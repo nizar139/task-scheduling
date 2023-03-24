@@ -1,7 +1,7 @@
 from mpi4py import MPI
 import json
 import numpy as np
-# import time
+import time
 
 
 def open_graph(file_num):
@@ -11,14 +11,14 @@ def open_graph(file_num):
     for name in names:
         path = './graphs1/{}.json'.format(name)
         paths.append(path)
-    print(paths[0])
+    # print(paths[0])
     with open(paths[file_num], 'r') as f:
         data = json.load(f)
         nodes = data['nodes']
     return nodes
 
 
-nodes = open_graph(0)
+nodes = open_graph(5)
 
 
 def create_successors():
@@ -63,37 +63,37 @@ def update_nodes(update):
 def calculate_rank_lvl(nodes_queue):
     update = dict()
     new_leaves = set()
-    for node in nodes_queue:
-        condition = False
-        M = 0
-        for succ in nodes[node]['Successors']:
-            if 'Rank' in nodes[succ]:
-                u = nodes[succ]['Rank']
-                if u > M:
-                    M = u
-            else:
-                condition = True
-                break
-        if condition:
-            continue
-        update[node] = nodes[node].copy()
-        update[node]['Rank'] = nodes[node]['Weight'] + M
-        new_leaves = new_leaves + set(nodes[node]['Dependencies'])
+    if len(nodes_queue) > 0:
+        for node_number in nodes_queue:
+            node = str(node_number)
+            condition = False
+            M = 0
+            for succ in nodes[node]['Successors']:
+                if 'Rank' in nodes[succ]:
+                    u = nodes[succ]['Rank']
+                    if u > M:
+                        M = u
+                else:
+                    condition = True
+                    break
+            if condition:
+                continue
+            update[node] = nodes[node].copy()
+            update[node]['Rank'] = nodes[node]['Weight'] + M
+            new_leaves = new_leaves | set(nodes[node]['Dependencies'])
 
     return update, new_leaves
 
 
-def divide_leaves(leaves, n):
-    q = len(leaves)//n
-    count = 0
-    leaves_list = [list() for i in range(n)]
+def divide_leaves(leaves, n, master):
+    count = master + 1
+    leaves_list = [set() for i in range(n)]
+    # leaves_copy = leaves.copy()
     for leave in leaves:
-        id = count % q
-        if id < n:
-            leaves_list[id].add(leave)
-        else:
-            leaves_list[n-1].add(leave)
+        id = count % n
+        leaves_list[id].add(leave)
         count += 1
+
     return leaves_list
 
 
@@ -102,7 +102,7 @@ def make_priority_list():
     rank_list = []
     for node in nodes:
         node_list.append(node)
-        rank_list.append(nodes[node]['rank'])
+        rank_list.append(nodes[node]['Rank'])
 
     # print(node_list)
     # print(rank_list)
@@ -114,39 +114,81 @@ def make_priority_list():
 
 
 def main():
+    master = 0
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
-    ready_to_start, leaves = preprocess_graph()
+
+    # print(rank)
+
     nodes_update = dict()
-    while len(leaves) > 0:
-        if rank == 0:
-            leaves_list = divide_leaves(leaves, rank)
+
+    if rank == master:
+        # print('test from 0')
+        start_time = time.time()
+        ready_to_start, leaves = preprocess_graph()
+        # print('leaves :', leaves)
+        while True:
+            if len(leaves) == 0:
+                for core in range(size):
+                    if core != master:
+                        tag_num = 1 + 10*core
+                        data_to_send = 'Stop'
+                        comm.send(obj=data_to_send, dest=core, tag=tag_num)
+                break
+
+            leaves_list = divide_leaves(leaves, size, master)
+            # print('list of leaves', leaves_list)
             nodes_queue = leaves_list[0]
-            for core in len(1, size):
-                data_to_send = [nodes_update, leaves_list[core]]
-                comm.send(obj=data_to_send, dest=core)
+            for core in range(size):
+                if core != master:
+                    tag_num = 1 + 10*core
+                    data_to_send = [nodes_update, leaves_list[core]]
+                    comm.send(obj=data_to_send, dest=core, tag=tag_num)
+                # req.wait()
+            update_nodes(nodes_update)
+            nodes_update, leaves = calculate_rank_lvl(nodes_queue)
+            for core in range(size):
+                if core != master:
+                    tag_num = 2 + 10*core
+                    new_update, new_leaves = comm.recv(
+                        source=core, tag=tag_num)
+                    nodes_update.update(new_update)
+                    leaves = leaves | new_leaves
+            # print('leaves :', leaves)
 
-        else:
-            nodes_update, nodes_queue = comm.recv(source=0)
-        update_nodes(nodes_update)
-        nodes_update, leaves = calculate_rank_lvl(nodes_queue)
-
-        if rank != 0:
+    else:
+        preprocess_graph()
+        while True:
+            # print(rank, 'getting data from master')
+            tag_num = 1 + 10*rank
+            data_received = comm.recv(source=master, tag=tag_num)
+            if data_received == 'Stop':
+                # print(rank, 'received stop')
+                break
+            # print('{} got data'.format(rank))
+            nodes_update, nodes_queue = data_received
+            update_nodes(nodes_update)
+            nodes_update, leaves = calculate_rank_lvl(nodes_queue)
+            tag_num += 1
             data_to_send = [nodes_update, leaves]
-            comm.send(obj=data_to_send, dest=0)
-
-        else:
-            for core in range(1, size):
-                new_update, new_leaves = comm.recv(source=core)
-                nodes_update.update(new_update)
-                leaves = leaves + new_leaves
+            comm.send(obj=data_to_send, dest=master, tag=tag_num)
+        # print(rank, 'stopped')
 
     update_nodes(nodes_update)
 
-    priority_list = make_priority_list()
-    print(priority_list)
-    return (priority_list)
+    if rank == master:
+        print('ranks calculated')
+        # print('nodes', nodes)
+
+        priority_list = make_priority_list()
+        duration = time.time() - start_time
+        print('finished job, duration :', duration)
+        # first = priority_list[0]
+        # print(first)
+        # print(nodes[first])
+        # print(priority_list)
+        # return (priority_list)
 
 
 if __name__ == "__main__":
