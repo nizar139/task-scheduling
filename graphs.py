@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import json
 
-names = ['smallRandom','xsmallComplex','smallComplex','mediumRandom','MediumComplex','largeComplex','xlargeComplex','xxlargeComplex']
+names = ['smallRandom']
 def create_path(names):
     paths = []
     for name in names : 
