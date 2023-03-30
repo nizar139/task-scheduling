@@ -11,7 +11,7 @@ def open_graph(file_num):
 
     names = ['smallRandom', 'xsmallComplex', 'smallComplex', 'mediumRandom',
              'MediumComplex', 'largeComplex', 'xlargeComplex', 'xxlargeComplex']
-    path_end = 'graphs\\{}.json'.format(names[file_num])
+    path_end = 'graphs1\\{}.json'.format(names[file_num])
     file_path = os.path.join(parpath, path_end)
     # print('path :', file_path)
     # print(paths[0])
