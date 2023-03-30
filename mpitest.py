@@ -2,23 +2,27 @@ from mpi4py import MPI
 import json
 import numpy as np
 import time
+import os.path
+path = os.path.realpath(__file__)
+parpath = os.path.join(path, os.pardir)
 
 
 def open_graph(file_num):
+
     names = ['smallRandom', 'xsmallComplex', 'smallComplex', 'mediumRandom',
              'MediumComplex', 'largeComplex', 'xlargeComplex', 'xxlargeComplex']
-    paths = []
-    for name in names:
-        path = './graphs1/{}.json'.format(name)
-        paths.append(path)
+    path_end = 'graphs\\{}.json'.format(names[file_num])
+    file_path = os.path.join(parpath, path_end)
+    # print('path :', file_path)
     # print(paths[0])
-    with open(paths[file_num], 'r') as f:
+    with open(file_path, 'r') as f:
         data = json.load(f)
         nodes = data['nodes']
     return nodes
 
 
-nodes = open_graph(5)
+loading_time = time.time()
+nodes = open_graph(3)
 
 
 def create_successors():
@@ -51,17 +55,26 @@ def preprocess_graph():
         lenth = len(nodes[node]['Successors'])
         nodes[node]['Succ_count'] = lenth
         if lenth == 0:
-            leaves.add(node)
+            leaves.add(int(node))
     return ready_to_start, leaves
 
 
-def update_nodes(update):
-    for node in update:
-        nodes[node] = update[node].copy()
+def update_nodes(index_update, rank_update):
+    n = len(index_update)
+    for i in range(n):
+        int_node = index_update[i]
+        if int_node > 0:
+            node = str(int_node)
+            rank = rank_update[i]
+            nodes[node]['Rank'] = rank
+    # for node in update:
+    #     nodes[node] = update[node].copy()
 
 
 def calculate_rank_lvl(nodes_queue):
-    update = dict()
+    rank_update = np.zeros(len(nodes_queue), dtype=np.float32)
+    index_update = np.zeros(len(nodes_queue), dtype=np.int32)
+    id_count = 0
     new_leaves = set()
     if len(nodes_queue) > 0:
         for node_number in nodes_queue:
@@ -78,11 +91,12 @@ def calculate_rank_lvl(nodes_queue):
                     break
             if condition:
                 continue
-            update[node] = nodes[node].copy()
-            update[node]['Rank'] = nodes[node]['Weight'] + M
+            index_update[id_count] = int(node)
+            rank_update[id_count] = nodes[node]['Weight'] + M
+            id_count += 1
             new_leaves = new_leaves | set(nodes[node]['Dependencies'])
 
-    return update, new_leaves
+    return index_update, rank_update, new_leaves
 
 
 def divide_leaves(leaves, n, master):
@@ -115,16 +129,20 @@ def make_priority_list():
 
 def main():
     master = 0
+    load_time = time.time()-loading_time
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
+    print('hi from', rank)
 
     # print(rank)
 
-    nodes_update = dict()
+    rank_update = np.array([])
+    index_update = np.array([])
 
     if rank == master:
         # print('test from 0')
+        print('loading time :', load_time)
         start_time = time.time()
         ready_to_start, leaves = preprocess_graph()
         # print('leaves :', leaves)
@@ -133,8 +151,8 @@ def main():
                 for core in range(size):
                     if core != master:
                         tag_num = 1 + 10*core
-                        data_to_send = 'Stop'
-                        comm.send(obj=data_to_send, dest=core, tag=tag_num)
+                        data_to_send = np.array([-1])
+                        comm.ssend(obj=data_to_send, dest=core, tag=tag_num)
                 break
 
             leaves_list = divide_leaves(leaves, size, master)
@@ -143,17 +161,31 @@ def main():
             for core in range(size):
                 if core != master:
                     tag_num = 1 + 10*core
-                    data_to_send = [nodes_update, leaves_list[core]]
-                    comm.send(obj=data_to_send, dest=core, tag=tag_num)
+                    # data_to_send = [nodes_update, leaves_list[core]]
+                    # comm.send(obj=data_to_send, dest=core, tag=tag_num)
+                    comm.ssend(obj=index_update, dest=core, tag=tag_num)
+                    tag_num += 1
+                    comm.ssend(obj=rank_update, dest=core, tag=tag_num)
+                    tag_num += 1
+                    comm.ssend(obj=leaves_list[core], dest=core, tag=tag_num)
                 # req.wait()
-            update_nodes(nodes_update)
-            nodes_update, leaves = calculate_rank_lvl(nodes_queue)
+            update_nodes(index_update, rank_update)
+            index_update, rank_update, leaves = calculate_rank_lvl(nodes_queue)
+            # print('from master', nodes_update)
             for core in range(size):
                 if core != master:
-                    tag_num = 2 + 10*core
-                    new_update, new_leaves = comm.recv(
-                        source=core, tag=tag_num)
-                    nodes_update.update(new_update)
+                    tag_num = 4 + 10*core
+                    new_index = comm.recv(source=core, tag=tag_num)
+                    tag_num += 1
+                    new_rank = comm.recv(source=core, tag=tag_num)
+                    tag_num += 1
+                    new_leaves = comm.recv(source=core, tag=tag_num)
+                    # print(nodes_update)
+                    # print(new_update)
+                    index_update = np.concatenate(
+                        (index_update, new_index), axis=None)
+                    rank_update = np.concatenate(
+                        (rank_update, new_rank), axis=None)
                     leaves = leaves | new_leaves
             # print('leaves :', leaves)
 
@@ -163,19 +195,32 @@ def main():
             # print(rank, 'getting data from master')
             tag_num = 1 + 10*rank
             data_received = comm.recv(source=master, tag=tag_num)
-            if data_received == 'Stop':
+            if len(data_received) == 1 and data_received[0] == -1:
                 # print(rank, 'received stop')
                 break
-            # print('{} got data'.format(rank))
-            nodes_update, nodes_queue = data_received
-            update_nodes(nodes_update)
-            nodes_update, leaves = calculate_rank_lvl(nodes_queue)
-            tag_num += 1
-            data_to_send = [nodes_update, leaves]
-            comm.send(obj=data_to_send, dest=master, tag=tag_num)
+            else:
+
+                # print('{} got data'.format(rank))
+                index_update = data_received
+                tag_num += 1
+                rank_update = comm.recv(source=master, tag=tag_num)
+                tag_num += 1
+                nodes_queue = comm.recv(source=master, tag=tag_num)
+                # print(nodes_queue)
+                update_nodes(index_update, rank_update)
+                index_update, rank_update, leaves = calculate_rank_lvl(
+                    nodes_queue)
+                # print('from slave', nodes_update)
+                tag_num += 1
+                # data_to_send = [nodes_update, leaves]
+                comm.ssend(obj=index_update, dest=master, tag=tag_num)
+                tag_num += 1
+                comm.ssend(obj=rank_update, dest=master, tag=tag_num)
+                tag_num += 1
+                comm.ssend(obj=leaves, dest=master, tag=tag_num)
         # print(rank, 'stopped')
 
-    update_nodes(nodes_update)
+    update_nodes(index_update, rank_update)
 
     if rank == master:
         print('ranks calculated')
